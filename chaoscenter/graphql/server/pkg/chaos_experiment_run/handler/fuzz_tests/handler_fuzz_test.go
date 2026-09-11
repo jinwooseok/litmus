@@ -2,6 +2,7 @@ package fuzz_tests
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,11 @@ func FuzzGetExperimentRun(f *testing.F) {
 			return
 		}
 
+		shouldErr, err := fuzzConsumer.GetBool()
+		if err != nil {
+			return
+		}
+
 		ctx := context.Background()
 		mockServices := NewMockServices()
 		findResult := []interface{}{bson.D{
@@ -120,15 +126,23 @@ func FuzzGetExperimentRun(f *testing.F) {
 			}},
 		}}
 
-		cursor, _ := mongo.NewCursorFromDocuments(findResult, nil, nil)
-		mockServices.MongodbOperator.On("Aggregate", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(cursor, nil).Once()
+		var (
+			cursor *mongo.Cursor
+			aggErr error
+		)
+		if shouldErr {
+			aggErr = errors.New("mocked aggregate failure")
+		} else {
+			cursor, _ = mongo.NewCursorFromDocuments(findResult, nil, nil)
+		}
+		mockServices.MongodbOperator.On("Aggregate", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(cursor, aggErr).Once()
 
 		res, err := mockServices.ChaosExperimentRunHandler.GetExperimentRun(ctx, targetStruct.ProjectID, &targetStruct.ExperimentRunID, &targetStruct.NotifyID)
-		if err != nil {
-			t.Errorf("ChaosExperimentRunHandler.GetExperimentRun() error = %v", err)
+		if (err != nil) != shouldErr {
+			t.Errorf("ChaosExperimentRunHandler.GetExperimentRun() error = %v, shouldErr %v", err, shouldErr)
 			return
 		}
-		if res == nil {
+		if !shouldErr && res == nil {
 			t.Errorf("Returned response is nil")
 		}
 	})
@@ -146,6 +160,12 @@ func FuzzListExperimentRun(f *testing.F) {
 			return
 		}
 
+		shouldErr, err := fuzzConsumer.GetBool()
+		if err != nil {
+			return
+		}
+		targetStruct.Request.Filter = nil
+
 		mockServices := NewMockServices()
 		findResult := []interface{}{bson.D{
 			{Key: "project_id", Value: targetStruct.ProjectID},
@@ -158,15 +178,23 @@ func FuzzListExperimentRun(f *testing.F) {
 				},
 			},
 		}}
-		cursor, _ := mongo.NewCursorFromDocuments(findResult, nil, nil)
-		mockServices.MongodbOperator.On("Aggregate", mock.Anything, mongodb.ChaosExperimentRunsCollection, mock.Anything, mock.Anything).Return(cursor, nil).Once()
+		var (
+			cursor *mongo.Cursor
+			aggErr error
+		)
+		if shouldErr {
+			aggErr = errors.New("mocked aggregate failure")
+		} else {
+			cursor, _ = mongo.NewCursorFromDocuments(findResult, nil, nil)
+		}
+		mockServices.MongodbOperator.On("Aggregate", mock.Anything, mongodb.ChaosExperimentRunsCollection, mock.Anything, mock.Anything).Return(cursor, aggErr).Once()
 
 		res, err := mockServices.ChaosExperimentRunHandler.ListExperimentRun(targetStruct.ProjectID, targetStruct.Request)
-		if err != nil {
-			t.Errorf("ListExperimentRun() error = %v", err)
+		if (err != nil) != shouldErr {
+			t.Errorf("ListExperimentRun() error = %v, shouldErr %v", err, shouldErr)
 			return
 		}
-		if res == nil {
+		if !shouldErr && res == nil {
 			t.Errorf("Returned response is nil")
 		}
 
@@ -185,25 +213,33 @@ func FuzzRunChaosWorkFlow(f *testing.F) {
 			return
 		}
 
+		shouldErr, err := fuzzConsumer.GetBool()
+		if err != nil {
+			return
+		}
+
 		mockServices := NewMockServices()
-		mockServices.MongodbOperator.On("StartSession").Return(mock.Anything, nil).Once()
-		mockServices.MongodbOperator.On("Update", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(&mongo.UpdateResult{}, nil).Once()
-		mockServices.MongodbOperator.On("CommitTransaction", mock.Anything).Return(nil).Once()
-		mockServices.MongodbOperator.On("AbortTransaction", mock.Anything).Return(nil).Once()
 
 		findResult := []interface{}{bson.D{
 			{Key: "infra_id", Value: targetStruct.ProjectID},
 		}}
-		singleResult := mongo.NewSingleResultFromDocument(findResult[0], nil, nil)
+		var getErr error
+		if shouldErr {
+			getErr = errors.New("mocked infra fetch failure")
+		}
+		singleResult := mongo.NewSingleResultFromDocument(findResult[0], getErr, nil)
 		mockServices.MongodbOperator.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(singleResult, nil).Once()
 
-		res, err := mockServices.ChaosExperimentRunHandler.RunChaosWorkFlow(context.Background(), targetStruct.ProjectID, targetStruct.Workflow, nil)
-		if strings.Contains(err.Error(), "inactive infra") {
-			t.Log("Handled expected error due to inactive infrastructure: ", err)
+		_, err = mockServices.ChaosExperimentRunHandler.RunChaosWorkFlow(context.Background(), targetStruct.ProjectID, targetStruct.Workflow, nil)
+		if err == nil {
+			t.Errorf("RunChaosWorkFlow() expected an error (either infra fetch failure or inactive infra), got nil")
 			return
 		}
-		if res == nil {
-			t.Errorf("Returned response is nil")
+		if shouldErr {
+			return
+		}
+		if !strings.Contains(err.Error(), "inactive infra") {
+			t.Errorf("RunChaosWorkFlow() error = %v, want inactive infra error", err)
 		}
 	})
 }
@@ -220,6 +256,11 @@ func FuzzGetExperimentRunStats(f *testing.F) {
 		}
 		targetStruct.ProjectID = uuid.New().String()
 
+		shouldErr, err := fuzzConsumer.GetBool()
+		if err != nil {
+			return
+		}
+
 		mockServices := NewMockServices()
 
 		findResult := []interface{}{bson.D{
@@ -233,15 +274,23 @@ func FuzzGetExperimentRunStats(f *testing.F) {
 				},
 			},
 		}}
-		cursor, _ := mongo.NewCursorFromDocuments(findResult, nil, nil)
-		mockServices.MongodbOperator.On("Aggregate", mock.Anything, mongodb.ChaosExperimentRunsCollection, mock.Anything, mock.Anything).Return(cursor, nil).Once()
+		var (
+			cursor *mongo.Cursor
+			aggErr error
+		)
+		if shouldErr {
+			aggErr = errors.New("mocked aggregate failure")
+		} else {
+			cursor, _ = mongo.NewCursorFromDocuments(findResult, nil, nil)
+		}
+		mockServices.MongodbOperator.On("Aggregate", mock.Anything, mongodb.ChaosExperimentRunsCollection, mock.Anything, mock.Anything).Return(cursor, aggErr).Once()
 
 		res, err := mockServices.ChaosExperimentRunHandler.GetExperimentRunStats(context.Background(), targetStruct.ProjectID)
-		if err != nil {
-			t.Errorf("GetExperimentRunStats() error = %v", err)
+		if (err != nil) != shouldErr {
+			t.Errorf("GetExperimentRunStats() error = %v, shouldErr %v", err, shouldErr)
 			return
 		}
-		if res == nil {
+		if !shouldErr && res == nil {
 			t.Errorf("Returned response is nil")
 		}
 	})
