@@ -2,6 +2,7 @@ package fuzz_tests
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -54,7 +55,17 @@ func FuzzCreateEnvironment(f *testing.F) {
 		if err != nil {
 			return
 		}
-		mongodbMockOperator.On("Create", mock.Anything, mongodb.EnvironmentCollection, mock.Anything).Return(nil).Once()
+
+		shouldErr, err := fuzzConsumer.GetBool()
+		if err != nil {
+			return
+		}
+		var createErr error
+		if shouldErr {
+			createErr = errors.New("mocked mongo create error")
+		}
+		mongodbMockOperator.On("Create", mock.Anything, mongodb.EnvironmentCollection, mock.Anything).Return(createErr).Once()
+
 		token, err := GetSignedJWT("testUser")
 		if err != nil {
 			logrus.Errorf("Error genrating token %v", err)
@@ -64,10 +75,11 @@ func FuzzCreateEnvironment(f *testing.F) {
 		service := handler.NewEnvironmentService(environmentOperator)
 
 		env, err := service.CreateEnvironment(ctx, targetStruct.projectID, &targetStruct.input, "")
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
+		if (err != nil) != shouldErr {
+			t.Errorf("CreateEnvironment() error = %v, shouldErr %v", err, shouldErr)
+			return
 		}
-		if env == nil {
+		if !shouldErr && env == nil {
 			t.Errorf("Returned environment is nil")
 		}
 	})
@@ -77,25 +89,57 @@ func FuzzTestDeleteEnvironment(f *testing.F) {
 	testCases := []struct {
 		projectID     string
 		environmentID string
+		failAt        int
 	}{
 		{
 			projectID:     "testProject",
 			environmentID: "testEnvID",
+			failAt:        0,
+		},
+		{
+			projectID:     "testProject",
+			environmentID: "testEnvID",
+			failAt:        1,
+		},
+		{
+			projectID:     "testProject",
+			environmentID: "testEnvID",
+			failAt:        2,
 		},
 	}
 	for _, tc := range testCases {
-		f.Add(tc.projectID, tc.environmentID)
+		f.Add(tc.projectID, tc.environmentID, tc.failAt)
 	}
 
-	f.Fuzz(func(t *testing.T, projectID string, environmentID string) {
+	f.Fuzz(func(t *testing.T, projectID string, environmentID string, failAt int) {
+		mode := failAt % 3
+		if mode < 0 {
+			mode += 3
+		}
 
 		findResult := []interface{}{bson.D{
 			{Key: "environment_id", Value: environmentID},
 			{Key: "project_id", Value: projectID},
 		}}
-		singleResult := mongo.NewSingleResultFromDocument(findResult[0], nil, nil)
-		mongodbMockOperator.On("Get", mock.Anything, mongodb.EnvironmentCollection, mock.Anything).Return(singleResult, nil).Once()
-		mongodbMockOperator.On("UpdateMany", mock.Anything, mongodb.EnvironmentCollection, mock.Anything, mock.Anything, mock.Anything).Return(&mongo.UpdateResult{}, nil).Once()
+
+		var (
+			getErr        error
+			updateManyErr error
+		)
+		switch mode {
+		case 0:
+			getErr = errors.New("mocked mongo get error")
+		case 1:
+			updateManyErr = errors.New("mocked mongo update error")
+		}
+
+		getResult := mongo.NewSingleResultFromDocument(findResult[0], getErr, nil)
+		mongodbMockOperator.On("Get", mock.Anything, mongodb.EnvironmentCollection, mock.Anything).Return(getResult, nil).Once()
+
+		if mode != 0 {
+			mongodbMockOperator.On("UpdateMany", mock.Anything, mongodb.EnvironmentCollection, mock.Anything, mock.Anything, mock.Anything).Return(&mongo.UpdateResult{}, updateManyErr).Once()
+		}
+
 		token, err := GetSignedJWT("testUser")
 		if err != nil {
 			logrus.Errorf("Error genrating token %v", err)
@@ -104,13 +148,14 @@ func FuzzTestDeleteEnvironment(f *testing.F) {
 		ctx := context.WithValue(context.Background(), authorization.AuthKey, token)
 		service := handler.NewEnvironmentService(environmentOperator)
 
+		wantErr := mode != 2
 		env, err := service.DeleteEnvironment(ctx, projectID, environmentID, "")
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
+		if (err != nil) != wantErr {
+			t.Errorf("DeleteEnvironment() error = %v, wantErr %v (failAt mode %d)", err, wantErr, mode)
+			return
 		}
-
-		if env == "" {
-			t.Errorf("Returned environment is nil")
+		if !wantErr && env == "" {
+			t.Errorf("Returned environment is empty")
 		}
 	})
 }
@@ -119,32 +164,45 @@ func FuzzTestGetEnvironment(f *testing.F) {
 	testCases := []struct {
 		projectID     string
 		environmentID string
+		shouldErr     bool
 	}{
 		{
 			projectID:     "testProject",
 			environmentID: "testEnvID",
+			shouldErr:     false,
+		},
+		{
+			projectID:     "testProject",
+			environmentID: "testEnvID",
+			shouldErr:     true,
 		},
 	}
 	for _, tc := range testCases {
-		f.Add(tc.projectID, tc.environmentID)
+		f.Add(tc.projectID, tc.environmentID, tc.shouldErr)
 	}
 
-	f.Fuzz(func(t *testing.T, projectID string, environmentID string) {
+	f.Fuzz(func(t *testing.T, projectID string, environmentID string, shouldErr bool) {
 
 		findResult := []interface{}{bson.D{
 			{Key: "environment_id", Value: environmentID},
 			{Key: "project_id", Value: projectID},
 		}}
-		singleResult := mongo.NewSingleResultFromDocument(findResult[0], nil, nil)
+
+		var getErr error
+		if shouldErr {
+			getErr = errors.New("mocked mongo get error")
+		}
+
+		singleResult := mongo.NewSingleResultFromDocument(findResult[0], getErr, nil)
 		mongodbMockOperator.On("Get", mock.Anything, mongodb.EnvironmentCollection, mock.Anything).Return(singleResult, nil).Once()
 		service := handler.NewEnvironmentService(environmentOperator)
 
 		env, err := service.GetEnvironment(projectID, environmentID)
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
+		if (err != nil) != shouldErr {
+			t.Errorf("GetEnvironment() error = %v, shouldErr %v", err, shouldErr)
+			return
 		}
-
-		if env == nil {
+		if !shouldErr && env == nil {
 			t.Errorf("Returned environment is nil")
 		}
 	})
